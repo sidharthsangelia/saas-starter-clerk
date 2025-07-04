@@ -1,4 +1,4 @@
-// app/api/webhooks/clerk/route.ts
+// app/api/webhook/register/route.ts
 import { Webhook } from "svix";
 import type { WebhookEvent } from "@clerk/nextjs/server";
 import { headers } from "next/headers";
@@ -6,26 +6,34 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/Prisma";
 
 export async function POST(req: Request): Promise<NextResponse> {
-  console.log("🚀 Webhook endpoint hit!");
+  console.log("🚨 WEBHOOK HIT - POST REQUEST RECEIVED");
+  console.log("⏰ Timestamp:", new Date().toISOString());
   
-  const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+  // Log ALL environment variables (be careful in production)
+  console.log("🔧 Environment check:");
+  console.log("- NODE_ENV:", process.env.NODE_ENV);
+  console.log("- WEBHOOK_SECRET exists:", !!process.env.WEBHOOK_SECRET);
+  console.log("- WEBHOOK_SECRET length:", process.env.WEBHOOK_SECRET?.length);
+  console.log("- DATABASE_URL exists:", !!process.env.DATABASE_URL);
   
-  console.log("🔑 Webhook secret exists:", !!WEBHOOK_SECRET);
-  console.log("🔑 Webhook secret length:", WEBHOOK_SECRET?.length);
-  
-  if (!WEBHOOK_SECRET) {
-    console.error("❌ Missing Clerk Webhook Secret");
-    return NextResponse.json({ error: "Missing webhook secret" }, { status: 500 });
-  }
-
   try {
-    // Read raw body
-    const payload = await req.text();
-    console.log("📦 Received payload length:", payload.length);
-    console.log("📦 Payload preview:", payload.substring(0, 200) + "...");
+    // Test database connection FIRST
+    console.log("🔍 Testing database connection...");
+    const dbTest = await prisma.$connect();
+    console.log("✅ Database connected successfully");
     
-    // Get headers
+    const payload = await req.text();
+    console.log("📦 Payload received:");
+    console.log("- Length:", payload.length);
+    console.log("- First 500 chars:", payload.substring(0, 500));
+    
     const headerPayload = await headers();
+    
+    // Log ALL headers
+    console.log("📋 ALL HEADERS:");
+    headerPayload.forEach((value, key) => {
+      console.log(`- ${key}: ${value}`);
+    });
     
     const svixHeaders = {
       "svix-id": headerPayload.get("svix-id") ?? "",
@@ -33,72 +41,82 @@ export async function POST(req: Request): Promise<NextResponse> {
       "svix-signature": headerPayload.get("svix-signature") ?? "",
     };
     
-    console.log("🔐 Headers received:", {
-      id: svixHeaders["svix-id"],
-      timestamp: svixHeaders["svix-timestamp"],
-      signature: svixHeaders["svix-signature"] ? "present" : "missing",
-      signatureLength: svixHeaders["svix-signature"]?.length
-    });
-
-    // Check if any headers are missing
-    if (!svixHeaders["svix-id"] || !svixHeaders["svix-timestamp"] || !svixHeaders["svix-signature"]) {
-      console.error("❌ Missing required headers");
-      return NextResponse.json({ error: "Missing required headers" }, { status: 400 });
-    }
-
-    const wh = new Webhook(WEBHOOK_SECRET);
+    console.log("🔐 Svix headers extracted:");
+    console.log("- svix-id:", svixHeaders["svix-id"]);
+    console.log("- svix-timestamp:", svixHeaders["svix-timestamp"]);
+    console.log("- svix-signature length:", svixHeaders["svix-signature"]?.length);
     
-    let evt: WebhookEvent;
-    try {
-      console.log("🔍 Attempting to verify webhook...");
-      evt = wh.verify(payload, svixHeaders) as WebhookEvent;
-      console.log("✅ Webhook verified successfully!");
-      console.log("📋 Event type:", evt.type);
-      console.log("📋 Event data keys:", Object.keys(evt.data));
-    } catch (err) {
-      console.error("❌ Signature verification failed:", err);
-      console.error("❌ Error details:", {
-        name: err instanceof Error ? err.name : 'Unknown',
-        message: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined
-      });
-      return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
+    if (!process.env.WEBHOOK_SECRET) {
+      console.error("❌ WEBHOOK_SECRET is missing!");
+      return NextResponse.json({ error: "Missing webhook secret" }, { status: 500 });
     }
-
-    // Handle the event
+    
+    console.log("🔑 Creating Webhook instance...");
+    const wh = new Webhook(process.env.WEBHOOK_SECRET);
+    
+    console.log("🔍 Attempting webhook verification...");
+    let evt: WebhookEvent;
+    
+    try {
+      evt = wh.verify(payload, svixHeaders) as WebhookEvent;
+      console.log("✅ WEBHOOK VERIFIED SUCCESSFULLY!");
+      console.log("📋 Event details:");
+      console.log("- Type:", evt.type);
+      console.log("- Data keys:", Object.keys(evt.data));
+      console.log("- Full event data:", JSON.stringify(evt.data, null, 2));
+    } catch (verifyError) {
+      console.error("❌ WEBHOOK VERIFICATION FAILED!");
+      console.error("Error name:", verifyError instanceof Error ? verifyError.name : "Unknown");
+      console.error("Error message:", verifyError instanceof Error ? verifyError.message : String(verifyError));
+      console.error("Error stack:", verifyError instanceof Error ? verifyError.stack : "No stack");
+      
+      return NextResponse.json({ 
+        error: "Webhook verification failed", 
+        details: verifyError instanceof Error ? verifyError.message : String(verifyError)
+      }, { status: 400 });
+    }
+    
+    // Handle events
     if (evt.type === "user.created") {
       console.log("👤 Processing user.created event");
-      const { id, email_addresses, first_name, last_name } = evt.data;
       
-      console.log("👤 User data received:", {
-        id,
-        email_addresses: email_addresses?.map(e => e.email_address),
-        first_name,
-        last_name
-      });
+      const userData = evt.data;
+      console.log("👤 Raw user data:", JSON.stringify(userData, null, 2));
       
-      const primaryEmail = email_addresses?.[0]?.email_address;
+      const { id, email_addresses, first_name, last_name } = userData;
+      
+      if (!id) {
+        console.error("❌ No user ID in event data");
+        return NextResponse.json({ error: "No user ID" }, { status: 400 });
+      }
+      
+      if (!email_addresses || !Array.isArray(email_addresses) || email_addresses.length === 0) {
+        console.error("❌ No email addresses in event data");
+        return NextResponse.json({ error: "No email addresses" }, { status: 400 });
+      }
+      
+      const primaryEmail = email_addresses[0]?.email_address;
       
       if (!primaryEmail) {
-        console.warn("⚠️ No primary email found in event");
-        return NextResponse.json({ error: "Email not found in event" }, { status: 400 });
+        console.error("❌ No primary email address found");
+        return NextResponse.json({ error: "No primary email" }, { status: 400 });
       }
-
-      console.log("🔍 Checking if user exists in database...");
       
-      // Check if user already exists
+      console.log("📧 Primary email:", primaryEmail);
+      
+      // Check if user exists
+      console.log("🔍 Checking if user exists...");
       const existingUser = await prisma.user.findUnique({
         where: { id }
       });
       
       if (existingUser) {
-        console.log("ℹ️ User already exists:", id);
+        console.log("ℹ️ User already exists:", existingUser);
         return NextResponse.json({ message: "User already exists" }, { status: 200 });
       }
-
-      console.log("📝 Creating new user in database...");
       
-      // Create new user
+      // Create user
+      console.log("📝 Creating new user...");
       const newUser = await prisma.user.create({
         data: {
           id,
@@ -107,52 +125,60 @@ export async function POST(req: Request): Promise<NextResponse> {
           subscriptionEnds: new Date(),
         },
       });
-
-      console.log("✅ User created in DB successfully:", newUser);
       
-    } else if (evt.type === "user.updated") {
-      console.log("👤 Processing user.updated event");
-      const { id, email_addresses } = evt.data;
-      const primaryEmail = email_addresses?.[0]?.email_address;
+      console.log("✅ USER CREATED SUCCESSFULLY!");
+      console.log("New user:", JSON.stringify(newUser, null, 2));
       
-      if (primaryEmail) {
-        await prisma.user.update({
-          where: { id },
-          data: {
-            email: primaryEmail,
-          },
-        });
-        console.log("✅ User updated in DB:", id);
-      }
-      
-    } else if (evt.type === "user.deleted") {
-      console.log("👤 Processing user.deleted event");
-      const { id } = evt.data;
-      
-      await prisma.user.delete({
-        where: { id },
-      });
-      console.log("✅ User deleted from DB:", id);
+      return NextResponse.json({ 
+        message: "User created successfully", 
+        userId: newUser.id 
+      }, { status: 200 });
       
     } else {
       console.log("ℹ️ Unhandled event type:", evt.type);
+      return NextResponse.json({ 
+        message: "Event received but not handled", 
+        eventType: evt.type 
+      }, { status: 200 });
     }
-
-    console.log("🎉 Webhook processed successfully!");
-    return NextResponse.json({ message: "Webhook processed successfully" }, { status: 200 });
     
   } catch (error) {
-    console.error("❌ Error processing webhook:", error);
-    console.error("❌ Error stack:", error instanceof Error ? error.stack : "No stack trace");
+    console.error("🚨 CRITICAL ERROR:");
+    console.error("Error name:", error instanceof Error ? error.name : "Unknown");
+    console.error("Error message:", error instanceof Error ? error.message : String(error));
+    console.error("Error stack:", error instanceof Error ? error.stack : "No stack");
+    
     return NextResponse.json({ 
-      error: "Webhook processing error", 
-      details: error instanceof Error ? error.message : "Unknown error" 
+      error: "Critical error", 
+      details: error instanceof Error ? error.message : String(error) 
     }, { status: 500 });
   }
 }
 
-// Add a simple GET handler for testing
+// Keep the GET handler for testing
 export async function GET() {
   console.log("📍 GET request to webhook endpoint");
-  return NextResponse.json({ message: "Webhook endpoint is working" }, { status: 200 });
+  
+  try {
+    // Test database
+    await prisma.$connect();
+    const userCount = await prisma.user.count();
+    
+    return NextResponse.json({ 
+      message: "Webhook endpoint is working",
+      database: "connected",
+      userCount,
+      env: {
+        hasWebhookSecret: !!process.env.WEBHOOK_SECRET,
+        webhookSecretLength: process.env.WEBHOOK_SECRET?.length,
+        hasDatabaseUrl: !!process.env.DATABASE_URL
+      }
+    });
+  } catch (error) {
+    return NextResponse.json({ 
+      message: "Webhook endpoint is working",
+      database: "error",
+      error: error instanceof Error ? error.message : String(error)
+    }, { status: 200 });
+  }
 }
