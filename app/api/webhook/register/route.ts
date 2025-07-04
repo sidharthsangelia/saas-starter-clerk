@@ -5,7 +5,7 @@ import { prisma } from "@/lib/Prisma";
  
 
 export async function POST(req: Request) {
-  const secret = process.env.SIGNING_SECRET;
+  const secret = process.env.WEBHOOK_SECRET;
   if (!secret) return new Response("Missing secret", { status: 500 });
 
   const wh = new Webhook(secret);
